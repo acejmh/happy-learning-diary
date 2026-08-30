@@ -1,27 +1,22 @@
 'use strict';
 
-/* 플랫폼 중립 경로. Netlify 는 netlify.toml 리다이렉트로,
-   Cloudflare 는 worker/index.js 라우팅으로 같은 곳에 붙는다. */
+/* 플랫폼 중립 경로. Vercel 은 api/analyze.js 가, Cloudflare 는 worker 라우팅이,
+   Netlify 는 netlify.toml 리다이렉트가 같은 곳으로 보낸다. */
 const API_URL = '/api/analyze';
 
 /* 업로드 전 리사이즈 기준.
-   Netlify 동기 함수의 버퍼 페이로드 상한은 6MB 이고 base64 로 약 33% 커지므로
-   실효 상한이 4.5MB 정도다. 요즘 폰 사진(3~8MB)은 그대로 보내면 걸린다.
+   서버리스 함수의 요청 페이로드 상한(4~4.5MB)에 폰 사진(3~8MB)이 그대로 걸린다.
    긴 변 1600px / JPEG 0.8 이면 OCR 정확도는 유지되면서 대개 300KB 안쪽으로 떨어진다. */
 const MAX_EDGE = 1600;
 const JPEG_QUALITY = 0.8;
-const TOTAL_MISSIONS = 3;
 
-const $ = (id) => document.getElementById(id);
+const MISSION_NAMES = { 1: '맞춤법', 2: '띄어쓰기', 3: '조사·문장' };
+const STEPS = ['사진', '확인', '맞춤법', '띄어쓰기', '조사·문장', '완료'];
+const LAST_MISSION = 3;
 
-let selectedFile = null;
-let previewUrl = null;
-let confirmedText = '';   // 아이가 "이 글이 맞아요"로 확정한 원본
-let currentText = '';     // 미션을 거치며 갱신되는 현재 글
-let mission = 0;
-const corrections = [];
-
-/* ---------------------------------------------------------------- 유틸 */
+/* ══════════════════════════════════════════════════════════
+   순수 함수 — test/client.mjs 가 이 구간만 잘라서 검증한다.
+   ══════════════════════════════════════════════════════════ */
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -29,117 +24,92 @@ function escapeHtml(s) {
   }[c]));
 }
 
-/** 응답이 JSON 이 아닐 수도 있다(413, 502, 프록시 HTML 등). 절대 터지지 않게 읽는다. */
-async function readJson(response) {
-  const text = await response.text();
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {
-      error: '서버가 예상치 못한 응답을 보냈어요. (HTTP ' + response.status + ')'
-    };
-  }
-}
-
-/* --------------------------------------------------- 단어 단위 diff 하이라이트 */
-
-/** 공백도 토큰으로 유지한다. 그래야 띄어쓰기 교정이 diff 에 잡힌다. */
-function tokenize(text) {
-  return String(text).match(/\s+|\S+/g) || [];
-}
-
-/** 최장 공통 부분수열. after 쪽에서 그대로 살아남은 토큰 위치를 표시해 돌려준다. */
-function lcsKeepMask(a, b) {
-  const n = a.length;
-  const m = b.length;
-  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j]
-        ? dp[i + 1][j + 1] + 1
-        : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-
-  const keep = new Array(m).fill(false);
-  let i = 0;
-  let j = 0;
-
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      keep[j] = true;
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      i++;
-    } else {
-      j++;
-    }
-  }
-
-  return keep;
-}
+/** 자리표시자로 쓸 보이지 않는 문자. 본문에 나올 일이 없다. */
+const SEP = '⁣';
 
 /**
- * before 대비 after 에서 새로 생긴 부분만 하이라이트한다.
+ * words 에 해당하는 부분만 <span class="cls"> 로 감싼다.
  *
- * 이스케이프를 diff **뒤에** 적용하는 것이 핵심이다.
- * 먼저 이스케이프하면 &quot; &#039; 같은 엔티티 안쪽 글자에 정규식이 걸려
+ * 자리표시자로 먼저 쪼갠 뒤 조각별로 이스케이프하는 순서가 핵심이다.
+ * 이스케이프를 먼저 하고 태그를 끼우면 &quot; 같은 엔티티 안쪽이 갈라져
  * 화면에 &quot; 가 그대로 노출된다.
  */
-function highlightDiff(before, after) {
-  const a = tokenize(before);
-  const b = tokenize(after);
-  const keep = lcsKeepMask(a, b);
+function wrap(text, words, open, close) {
+  let out = String(text);
 
-  let html = '';
-  let buffer = '';
-  let bufferChanged = false;
-
-  const flush = () => {
-    if (!buffer) return;
-    html += bufferChanged
-      ? '<span class="highlight">' + escapeHtml(buffer) + '</span>'
-      : escapeHtml(buffer);
-    buffer = '';
-  };
-
-  b.forEach((token, index) => {
-    const changed = !keep[index];
-
-    // 바뀐 토큰끼리는 묶어서 하나의 하이라이트로 보여 준다.
-    if (changed !== bufferChanged) {
-      flush();
-      bufferChanged = changed;
-    }
-
-    buffer += token;
+  words.forEach((w, i) => {
+    if (w) out = out.split(w).join(SEP + i + SEP);
   });
 
-  flush();
-
-  return html;
+  return out.split(SEP).map((part, idx) =>
+    idx % 2 === 1
+      ? open + escapeHtml(words[Number(part)]) + close
+      : escapeHtml(part)
+  ).join('');
 }
 
-/* ------------------------------------------------------------ 사진 리사이즈 */
+function paint(text, words, cls) {
+  return wrap(text, words, '<span class="' + cls + '">', '</span>');
+}
+
+/** 원문에 고친 내용을 순서대로 적용해 "고친 글" 을 만든다. */
+function buildAfter(text, log) {
+  return log.reduce((t, l) => t.split(l.wrong).join(l.answer), String(text));
+}
+
+/* ==== 순수 함수 끝 ==== */
+
+const $ = (id) => document.getElementById(id);
+
+const state = {
+  step: 0,
+  file: null,
+  previewUrl: null,
+  text: '',       // 아이가 확정한 원본
+  items: [],      // 이번 미션에서 고칠 항목
+  kind: 'word',
+  log: []         // { wrong, answer, why, tag }
+};
+
+/* ─────────────────────────────────────────── 통신 */
+
+/** 응답이 JSON 이 아닐 수도 있다(413, 502, 프록시 HTML). 절대 터지지 않게 읽는다. */
+async function readJson(response) {
+  const body = await response.text();
+
+  try {
+    return JSON.parse(body);
+  } catch {
+    return { error: '서버가 예상치 못한 응답을 보냈어요. (HTTP ' + response.status + ')' };
+  }
+}
+
+async function callApi(payload) {
+  const init = payload instanceof FormData
+    ? { method: 'POST', body: payload }
+    : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      };
+
+  const response = await fetch(API_URL, init);
+  const data = await readJson(response);
+
+  if (!response.ok) throw new Error(data.error || '요청에 실패했어요.');
+
+  return data;
+}
+
+/* ─────────────────────────────────────────── 사진 리사이즈 */
 
 function loadImage(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
 
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('사진을 열 수 없어요.'));
-    };
-
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('사진을 열 수 없어요.')); };
     img.src = url;
   });
 }
@@ -149,9 +119,7 @@ async function shrinkImage(file) {
   const img = await loadImage(file);
   const longEdge = Math.max(img.naturalWidth, img.naturalHeight);
 
-  if (longEdge <= MAX_EDGE && file.size <= 1500000) {
-    return file;
-  }
+  if (longEdge <= MAX_EDGE && file.size <= 1500000) return file;
 
   const scale = Math.min(1, MAX_EDGE / longEdge);
   const canvas = document.createElement('canvas');
@@ -160,252 +128,401 @@ async function shrinkImage(file) {
   canvas.height = Math.round(img.naturalHeight * scale);
 
   const ctx = canvas.getContext('2d');
-
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-  const blob = await new Promise((resolve) =>
-    canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY)
-  );
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', JPEG_QUALITY));
 
   if (!blob) return file;
 
-  // 줄인 게 더 크면(작은 PNG 등) 원본을 쓴다.
   return blob.size < file.size
     ? new File([blob], 'photo.jpg', { type: 'image/jpeg' })
     : file;
 }
 
-/* ------------------------------------------------------------ 1단계: 업로드 */
+/* ─────────────────────────────────────────── 화면 뼈대 */
 
-const fileInput = $('file');
-const drop = $('drop');
-const preview = $('preview');
-const readBtn = $('readBtn');
-
-function setReadStatus(message) {
-  $('readStatus').textContent = message;
+function drawRail() {
+  $('rail').innerHTML = STEPS.map((label, i) => {
+    const st = i < state.step ? 'done' : i === state.step ? 'now' : 'todo';
+    return '<span class="pip" data-state="' + st + '"><i></i><small>' + escapeHtml(label) + '</small></span>';
+  }).join('');
 }
 
-function acceptFile(f) {
-  if (!f) return;
+function setStatus(message, kind) {
+  const el = $('status');
+  if (!el) return;
+  el.textContent = message || '';
+  if (kind) el.dataset.kind = kind; else delete el.dataset.kind;
+}
 
-  if (!f.type.startsWith('image/')) {
-    setReadStatus('이미지 파일만 올려 주세요.');
+function render() {
+  drawRail();
+
+  if (state.step === 0) return screenUpload();
+  if (state.step === 1) return screenConfirm();
+  if (state.step <= 1 + LAST_MISSION) return screenMission(state.step - 1);
+
+  return screenDone();
+}
+
+function goto(step) {
+  state.step = step;
+  render();
+  window.scrollTo({ top: 0, behavior: 'auto' });
+}
+
+/* ─────────────────────────────────────────── 1단계: 사진 */
+
+function screenUpload() {
+  $('app').innerHTML =
+    '<section class="card">' +
+    '<p class="eyebrow">1단계</p>' +
+    '<h2>배움일기 사진을 올려요</h2>' +
+    '<p class="lede">공책을 찍은 사진을 올리면 글씨를 읽어 드려요. 그다음 세 가지 미션을 아빠랑 하나씩 풀어 봐요.</p>' +
+    '<div class="drop" id="drop">' +
+    '<b>📷 사진을 고르거나 여기로 끌어오세요</b>' +
+    '<small>밝은 곳에서 공책이 화면에 꽉 차게 찍으면 잘 읽혀요</small>' +
+    '<input id="file" type="file" accept="image/*" aria-label="배움일기 사진 고르기">' +
+    '</div>' +
+    '<img id="preview" class="preview" alt="고른 사진 미리보기" hidden>' +
+    '<p class="status" id="status">사진을 먼저 골라 주세요.</p>' +
+    '<div class="actions"><button class="btn btn-go" id="read" disabled>사진 글씨 읽기</button></div>' +
+    '</section>';
+
+  const drop = $('drop');
+
+  $('file').onchange = (e) => acceptFile(e.target.files[0]);
+
+  ['dragenter', 'dragover'].forEach((t) =>
+    drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+
+  ['dragleave', 'drop'].forEach((t) =>
+    drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+
+  drop.addEventListener('drop', (e) => acceptFile(e.dataTransfer.files[0]));
+
+  $('read').onclick = runOcr;
+
+  if (state.file) showPreview(state.file);
+}
+
+function showPreview(file) {
+  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+  state.previewUrl = URL.createObjectURL(file);
+
+  const img = $('preview');
+  img.src = state.previewUrl;
+  img.hidden = false;
+  $('read').disabled = false;
+}
+
+function acceptFile(file) {
+  if (!file) return;
+
+  if (!file.type.startsWith('image/')) {
+    setStatus('이미지 파일만 올려 주세요.', 'bad');
     return;
   }
 
-  selectedFile = f;
-
-  if (previewUrl) URL.revokeObjectURL(previewUrl);
-  previewUrl = URL.createObjectURL(f);
-
-  preview.src = previewUrl;
-  preview.style.display = 'block';
-  readBtn.disabled = false;
-  setReadStatus('사진이 준비됐어요.');
+  state.file = file;
+  showPreview(file);
+  setStatus('사진이 준비됐어요.');
 }
 
-fileInput.onchange = (e) => acceptFile(e.target.files[0]);
-
-['dragenter', 'dragover'].forEach((type) =>
-  drop.addEventListener(type, (e) => {
-    e.preventDefault();
-    drop.style.background = '#eaf4ff';
-  })
-);
-
-['dragleave', 'drop'].forEach((type) =>
-  drop.addEventListener(type, (e) => {
-    e.preventDefault();
-    drop.style.background = '';
-  })
-);
-
-drop.addEventListener('drop', (e) => acceptFile(e.dataTransfer.files[0]));
-
-readBtn.onclick = async () => {
-  readBtn.disabled = true;
-  setReadStatus('사진을 준비하는 중이에요…');
+async function runOcr() {
+  const btn = $('read');
+  btn.disabled = true;
+  setStatus('사진을 준비하는 중이에요…', 'busy');
 
   try {
-    const image = await shrinkImage(selectedFile);
+    const image = await shrinkImage(state.file);
 
-    setReadStatus('사진의 글씨를 읽는 중이에요…');
+    setStatus('사진의 글씨를 읽는 중이에요…', 'busy');
 
     const form = new FormData();
     form.append('image', image);
 
-    const response = await fetch(API_URL, { method: 'POST', body: form });
-    const data = await readJson(response);
+    const data = await callApi(form);
+    const text = (data.text || '').trim();
 
-    if (!response.ok) throw new Error(data.error || '인식에 실패했어요.');
+    if (!text) {
+      setStatus('글씨를 찾지 못했어요. 더 밝은 곳에서 다시 찍어 볼까요?', 'bad');
+      return;
+    }
 
-    const text = data.text || '';
-
-    $('sourceText').value = text;
-    $('sourceText').disabled = false;
-    $('confirmBtn').disabled = !text.trim();
-
-    setReadStatus(
-      text.trim()
-        ? '인식이 끝났어요. 원본 글과 맞는지 확인해 주세요.'
-        : '글씨를 찾지 못했어요. 더 밝은 곳에서 다시 찍어 볼까요?'
-    );
+    state.text = text;
+    goto(1);
   } catch (error) {
-    setReadStatus('인식에 실패했어요: ' + error.message);
+    setStatus(error.message, 'bad');
   } finally {
-    // 실패해도 성공해도 다시 시도할 수 있어야 한다.
-    readBtn.disabled = !selectedFile;
+    if ($('read')) $('read').disabled = !state.file;
   }
-};
+}
 
-/* ------------------------------------------------------- 2단계: 원문 확정 */
+/* ─────────────────────────────────────────── 2단계: 원문 확정 */
 
-$('confirmBtn').onclick = () => {
-  const text = $('sourceText').value.trim();
+function screenConfirm() {
+  $('app').innerHTML =
+    '<section class="card">' +
+    '<p class="eyebrow">2단계</p>' +
+    '<h2>이렇게 읽었어요. 맞나요?</h2>' +
+    '<p class="lede">잘못 읽은 글자가 있으면 고쳐 주세요. <b>맞춤법이 틀린 곳은 그대로 두세요</b> — 그걸 찾는 게 이번 공부예요.</p>' +
+    '<textarea class="sheet" id="src" spellcheck="false" aria-label="읽은 글 확인"></textarea>' +
+    '<p class="status" id="status"></p>' +
+    '<div class="actions">' +
+    '<button class="btn btn-go" id="ok">이 글이 맞아요</button>' +
+    '<button class="btn btn-quiet" id="back">사진 다시 고르기</button>' +
+    '</div>' +
+    '</section>';
 
-  if (!text) {
-    setReadStatus('글을 확인해 주세요.');
-    return;
-  }
+  $('src').value = state.text;
 
-  confirmedText = text;
-  currentText = text;
-  mission = 1;
+  $('ok').onclick = () => {
+    const text = $('src').value.trim();
 
-  $('title').textContent = '내가 쓴 글을 차근차근 고쳐 봐요.';
-  $('status').textContent = '정답을 직접 고친 뒤 다음으로 넘어가요.';
+    if (!text) { setStatus('글을 확인해 주세요.', 'bad'); return; }
 
-  renderMission();
-};
+    state.text = text;
+    state.log = [];
+    goto(2);
+  };
 
-/* ---------------------------------------------------------- 3단계: 미션 */
+  $('back').onclick = () => goto(0);
+}
 
-const MISSIONS = [
-  ['맞춤법 미션', '문장에서 맞춤법이 어색한 부분을 찾아 바르게 고쳐 보세요.', '예: 재미있엇다 → 재미있었다'],
-  ['띄어쓰기 미션', '붙어 있는 말을 알맞게 띄어 써 보세요.', '예: 두개 → 두 개, 배운점 → 배운 점'],
-  ['조사·문맥 미션', '누가 무엇을 했는지 잘 드러나도록 조사와 문장 연결을 고쳐 보세요.', '예: 나는 과학 실험 재미있었다 → 나는 과학 실험이 재미있었다.']
-];
+/* ─────────────────────────────────────────── 3단계: 미션 */
 
-function renderMission() {
-  const [name, description, hint] = MISSIONS[mission - 1];
-
-  $('step').textContent = mission + ' / ' + TOTAL_MISSIONS;
-  $('bar').style.width = (mission / TOTAL_MISSIONS) * 100 + '%';
+function screenMission(mission) {
+  const name = MISSION_NAMES[mission];
 
   $('app').innerHTML =
-    '<div class="ocr"><b>현재 글</b><br>' + escapeHtml(currentText) + '</div>' +
-    '<div class="mission">' +
-    '<h2>미션 ' + mission + ' · ' + name + '</h2>' +
-    '<p>' + description + '</p>' +
-    '<div class="hint">' + hint + '</div>' +
-    '<textarea id="answer" placeholder="고친 문장을 전체로 써 보세요."></textarea>' +
-    '<button class="primary" id="check">답변 확인하기</button>' +
-    '<div id="fb"></div>' +
-    '</div>';
+    '<section class="card">' +
+    '<p class="eyebrow">미션 ' + mission + ' / ' + LAST_MISSION + '</p>' +
+    '<h2>' + escapeHtml(name) + ' 미션</h2>' +
+    '<p class="lede" id="lede">고칠 곳을 찾는 중이에요…</p>' +
+    '<ul class="items" id="items"></ul>' +
+    '<p class="status" id="status"></p>' +
+    '<div class="actions" id="actions"></div>' +
+    '</section>';
 
-  // 값은 innerHTML 이 아니라 프로퍼티로 넣는다(이스케이프 이슈 원천 차단).
-  $('answer').value = currentText;
-  $('check').onclick = check;
+  loadMission(mission);
 }
 
-function showFeedback(message, ok) {
-  $('fb').innerHTML =
-    '<div class="' + (ok ? 'feedback' : 'hint') + '">' + escapeHtml(message) + '</div>';
-}
-
-async function check() {
-  const answer = $('answer').value.trim();
-
-  if (answer.length < 5) {
-    showFeedback('짧은 답변이에요. 문장 전체를 써 보세요.', false);
-    return;
-  }
-
-  // 다음 미션으로 넘어가는 중이면 버튼을 다시 켜지 않는다.
-  // (900ms 대기 동안 다시 눌러 중복 요청이 나가는 것을 막는다.)
-  let advancing = false;
-
-  $('check').disabled = true;
-  showFeedback('선생님이 읽어 보는 중이에요…', false);
+async function loadMission(mission) {
+  setStatus('고칠 곳을 찾는 중이에요…', 'busy');
 
   try {
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ original: currentText, answer: answer, mission: mission })
-    });
+    const data = await callApi({ mode: 'find', text: state.text, mission });
 
-    const data = await readJson(response);
+    state.items = data.items || [];
+    state.kind = data.kind || 'word';
 
-    if (!response.ok) {
-      showFeedback(data.error || '점검에 실패했어요. 다시 시도해 주세요.', false);
+    if (state.items.length === 0) {
+      $('lede').textContent = '이번 미션에서 고칠 곳이 없어요. 아주 잘 썼네요!';
+      setStatus('');
+      $('actions').innerHTML = '<button class="btn btn-go" id="next">다음으로</button>';
+      $('next').onclick = () => goto(state.step + 1);
       return;
     }
 
-    if (!data.pass) {
-      showFeedback(data.feedback || '문장의 뜻과 흐름을 다시 살펴보세요.', false);
-      return;
-    }
-
-    corrections.push(...(data.corrections || []));
-
-    /* corrected 는 이번 미션 범위만 고친 문장이다(프롬프트에서 그렇게 강제한다).
-       다음 미션에서 고칠 거리가 남아 있어야 3단계 학습이 성립한다. */
-    currentText = data.corrected || answer;
-
-    if (mission < TOTAL_MISSIONS) {
-      advancing = true;
-      showFeedback(data.feedback || '잘했어요! 다음 미션으로 갈게요.', true);
-      mission++;
-      setTimeout(renderMission, 900);
-      return;
-    }
-
-    advancing = true;
-    finish(data.feedback);
+    renderItems(mission);
   } catch (error) {
-    showFeedback('서버에 연결할 수 없어요: ' + error.message, false);
-  } finally {
-    if (!advancing && $('check')) $('check').disabled = false;
+    $('lede').textContent = '';
+    setStatus(error.message, 'bad');
+    $('actions').innerHTML = '<button class="btn btn-quiet" id="retry">다시 시도</button>';
+    $('retry').onclick = () => loadMission(mission);
   }
 }
 
-/* ------------------------------------------------------------ 완료 화면 */
+function renderItems(mission) {
+  const sentence = state.kind === 'sentence';
 
-function finish(lastFeedback) {
-  $('step').textContent = '완료';
-  $('bar').style.width = '100%';
-  $('title').textContent = '점검이 끝났어요!';
-  $('status').textContent = '전·후 문장과 고친 이유를 확인해 보세요.';
+  $('lede').textContent = sentence
+    ? '아래 문장을 자연스럽게 다시 써 볼까요?'
+    : '왼쪽이 고칠 말이에요. 오른쪽 칸에 바르게 써 보세요.';
 
-  const list = corrections.length
-    ? corrections
-        .map((c) =>
-          '<li><b>' + escapeHtml(c.before) + '</b> → <b>' + escapeHtml(c.after) +
-          '</b><br>' + escapeHtml(c.reason) + '</li>'
-        )
-        .join('')
-    : '<li>고친 부분이 없어요. 맞춤법과 띄어쓰기가 자연스러워요.</li>';
+  $('items').innerHTML = state.items.map((it, i) => {
+    const hint = it.hint
+      ? '<div class="hint"><b>힌트</b> · ' + escapeHtml(it.hint) + '</div>'
+      : '';
 
-  const praise = lastFeedback
-    ? '<div class="feedback">' + escapeHtml(lastFeedback) + '</div>'
-    : '';
+    if (sentence) {
+      const shown = wrap(it.wrong, [it.mark], '<u>', '</u>');
+
+      return '<li class="item" data-i="' + i + '">' +
+        '<p class="sentence">' + shown + '</p>' +
+        '<input class="fix-line" type="text" autocomplete="off" spellcheck="false"' +
+        ' placeholder="이 문장을 다시 써 보세요" aria-label="문장 고쳐 쓰기">' +
+        hint +
+        '<p class="verdict" hidden></p>' +
+        '</li>';
+    }
+
+    const ctx = it.ctx
+      ? '<p class="item-ctx">' + wrap(it.ctx, [it.wrong], '<mark>', '</mark>') + '</p>'
+      : '';
+
+    return '<li class="item" data-i="' + i + '">' +
+      ctx +
+      '<div class="pair">' +
+      '<span class="wrong">' + escapeHtml(it.wrong) + '</span>' +
+      '<span class="arrow" aria-hidden="true">→</span>' +
+      '<input class="fix" type="text" autocomplete="off" spellcheck="false"' +
+      ' placeholder="바르게 고쳐 쓰기" aria-label="' + escapeHtml(it.wrong) + ' 고쳐 쓰기">' +
+      '</div>' +
+      hint +
+      '<p class="verdict" hidden></p>' +
+      '</li>';
+  }).join('');
+
+  setStatus('');
+
+  $('actions').innerHTML =
+    '<button class="btn btn-go" id="check">확인하기</button>' +
+    '<button class="btn btn-quiet" id="reveal">모르겠어요</button>';
+
+  $('check').onclick = () => submit(mission, false);
+  $('reveal').onclick = () => submit(mission, true);
+}
+
+function collectAnswers() {
+  return state.items.map((it, i) => {
+    const li = document.querySelector('.item[data-i="' + i + '"]');
+    const input = li ? li.querySelector('.fix, .fix-line') : null;
+
+    return { wrong: it.wrong, input: input ? input.value.trim() : '' };
+  });
+}
+
+function setButtons(disabled) {
+  ['check', 'reveal'].forEach((id) => { if ($(id)) $(id).disabled = disabled; });
+}
+
+async function submit(mission, reveal) {
+  const answers = collectAnswers();
+
+  if (!reveal && answers.every((a) => !a.input)) {
+    setStatus('먼저 고쳐 써 볼까요?', 'bad');
+    return;
+  }
+
+  setButtons(true);
+  setStatus(reveal ? '정답을 알려 줄게요…' : '아빠가 읽어 보는 중이에요…', 'busy');
+
+  try {
+    const data = await callApi({
+      mode: 'grade', text: state.text, mission, answers, reveal
+    });
+
+    applyResults(data.results || [], mission, reveal);
+  } catch (error) {
+    setStatus(error.message, 'bad');
+  } finally {
+    setButtons(false);
+  }
+}
+
+function applyResults(results, mission, reveal) {
+  let allDone = true;
+
+  results.forEach((r, i) => {
+    const li = document.querySelector('.item[data-i="' + i + '"]');
+    if (!li) return;
+
+    const input = li.querySelector('.fix, .fix-line');
+    const out = li.querySelector('.verdict');
+    const settled = r.ok || reveal;
+
+    if (reveal && !r.ok && r.answer) input.value = r.answer;
+
+    li.dataset.state = r.ok ? 'ok' : 'miss';
+    out.dataset.kind = r.ok ? 'ok' : 'miss';
+    out.hidden = false;
+
+    if (r.ok) {
+      out.innerHTML = '<b>맞았어요</b><span>' + escapeHtml(r.why || '') + '</span>';
+    } else if (reveal) {
+      out.innerHTML = '<b>정답</b><span>' +
+        escapeHtml(r.answer || '') + ' — ' + escapeHtml(r.why || '') + '</span>';
+    } else {
+      out.innerHTML = '<b>다시</b><span>거의 다 왔어요. 힌트를 한 번 더 볼까요?</span>';
+      allDone = false;
+    }
+
+    if (settled) {
+      input.readOnly = true;
+
+      const answer = r.answer || r.input;
+
+      if (answer && !state.log.some((l) => l.wrong === r.wrong)) {
+        state.log.push({
+          wrong: r.wrong,
+          answer,
+          why: r.why || '',
+          tag: MISSION_NAMES[mission]
+        });
+      }
+    }
+  });
+
+  if (!allDone) {
+    setStatus('아직 남았어요. 고쳐서 다시 확인해 보세요.', 'bad');
+    return;
+  }
+
+  setStatus('');
+
+  const last = mission >= LAST_MISSION;
+
+  $('actions').innerHTML =
+    '<button class="btn btn-go" id="next">' + (last ? '결과 보기' : '다음 미션으로') + '</button>';
+
+  $('next').onclick = () => goto(state.step + 1);
+}
+
+/* ─────────────────────────────────────────── 완료 */
+
+function screenDone() {
+  const after = buildAfter(state.text, state.log);
+
+  const beforeHtml = paint(state.text, state.log.map((l) => l.wrong), 'was');
+  const afterHtml = paint(after, state.log.map((l) => l.answer), 'now');
+
+  const changes = state.log.length
+    ? state.log.map((l) =>
+        '<li class="change">' +
+        '<span class="change-w"><s>' + escapeHtml(l.wrong) + '</s> → <em>' +
+        escapeHtml(l.answer) + '</em></span>' +
+        '<span class="change-tag">' + escapeHtml(l.tag) + '</span>' +
+        '<span class="change-why">' + escapeHtml(l.why) + '</span>' +
+        '</li>').join('')
+    : '<li class="change"><span class="change-w">고친 곳 없음</span>' +
+      '<span class="change-why">맞춤법도 띄어쓰기도 문장도 자연스러웠어요.</span></li>';
 
   $('app').innerHTML =
-    '<div class="mission">' +
-    '<h2>완료 🎉</h2>' +
-    '<p>처음 쓴 글과 고친 글을 비교해 보세요.</p>' +
-    praise +
+    '<section class="card">' +
+    '<p class="eyebrow">완료</p>' +
+    '<h2>오늘 이만큼 고쳤어요</h2>' +
+    '<div class="score"><b>' + state.log.length + '</b><span>군데를 바르게 고쳤습니다</span></div>' +
     '<div class="compare">' +
-    '<div><b>전</b><br>' + escapeHtml(confirmedText) + '</div>' +
-    '<div><b>후</b><br>' + highlightDiff(confirmedText, currentText) + '</div>' +
+    '<div class="pane"><i>처음 쓴 글</i>' + beforeHtml + '</div>' +
+    '<div class="pane"><i>고친 글</i>' + afterHtml + '</div>' +
     '</div>' +
-    '<h3>무엇을 고쳤나요?</h3>' +
-    '<ul>' + list + '</ul>' +
-    '</div>' +
-    '<button class="primary" id="restart">새 글 점검하기</button>';
+    '<h3 style="margin-top:1.6rem">무엇을 어떻게 고쳤나요?</h3>' +
+    '<ul class="changes">' + changes + '</ul>' +
+    '<div class="actions"><button class="btn btn-go" id="again">새 일기 점검하기</button></div>' +
+    '</section>';
 
-  $('restart').onclick = () => location.reload();
+  $('again').onclick = () => {
+    if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    state.file = null;
+    state.previewUrl = null;
+    state.text = '';
+    state.items = [];
+    state.log = [];
+    goto(0);
+  };
 }
+
+render();
