@@ -266,32 +266,6 @@ test('grade: reveal 이면 틀려도 정답을 준다', async () => {
 test('grade: 모델이 개수를 적게 줘도 보낸 만큼 돌려준다', async () => {
   stubGemini(JSON.stringify({ results: [{ ok: true, answer: 'A', why: 'w' }] }));
 
-    answers: [{ wrong: '재미있엇다', input: '재미잇다' }]
-  })).json();
-
-  assert.equal(d.passed, false);
-  assert.ok(!('answer' in d.results[0]), '틀렸는데 정답이 새면 안 된다');
-  assert.ok(!('why' in d.results[0]));
-  assert.ok(!JSON.stringify(d).includes('재미있었다'));
-});
-
-test('grade: reveal 이면 틀려도 정답을 준다', async () => {
-  stubGemini(JSON.stringify({ results: [
-    { wrong: '재미있엇다', ok: false, answer: '재미있었다', why: '설명' }
-  ] }));
-
-  const d = await (await send({
-    mode: 'grade', text: TEXT, mission: 1, reveal: true,
-    answers: [{ wrong: '재미있엇다', input: '' }]
-  })).json();
-
-  assert.equal(d.results[0].ok, false);
-  assert.equal(d.results[0].answer, '재미있었다');
-});
-
-test('grade: 모델이 개수를 적게 줘도 보낸 만큼 돌려준다', async () => {
-  stubGemini(JSON.stringify({ results: [{ ok: true, answer: 'A', why: 'w' }] }));
-
   const d = await (await send({
     mode: 'grade', text: TEXT, mission: 2,
     answers: [
