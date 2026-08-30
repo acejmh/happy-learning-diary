@@ -1,3 +1,18 @@
 [build]
+  publish = "public"
   functions = "netlify/functions"
-  publish = "."
+
+# 클라이언트는 플랫폼 중립 경로인 /api/analyze 만 호출한다.
+# Cloudflare Workers 로 옮겨도 클라이언트 코드는 그대로 쓸 수 있다.
+[[redirects]]
+  from = "/api/analyze"
+  to = "/.netlify/functions/analyze"
+  status = 200
+  force = true
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    X-Frame-Options = "SAMEORIGIN"
