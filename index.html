@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>배움일기 맞춤법·문맥 코치</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header><div class="wrap"><div class="brand">AI 학습 코치 · 초등 글쓰기</div><h1>배움일기 맞춤법·문맥 코치</h1><p>사진 속 글을 읽고, 내가 쓴 글을 확인한 뒤 맞춤법·띄어쓰기·문장 흐름을 고쳐 봐요.</p></div></header>
+<main>
+<section class="card setup">
+<h2>1. 사진 올리기</h2>
+<div class="upload" id="drop">📷 사진을 선택하거나 여기로 끌어오세요<input id="file" type="file" accept="image/*"></div>
+<img id="preview" alt="선택한 사진">
+<button id="readBtn" class="primary" disabled>사진 글씨 인식하기</button>
+<div id="readStatus" class="small">사진을 먼저 선택해 주세요.</div>
+</section>
+<section class="card">
+<div class="topbar"><div><b id="title">사진을 올리면 시작할 수 있어요.</b><div id="status" class="small">원본 글을 확인한 후 점검을 시작합니다.</div></div><span id="step" class="pill">준비</span></div>
+<div class="progress"><div id="bar"></div></div>
+<div id="app">
+<div class="mission"><h2>2. 인식된 글 확인</h2><p>사진에서 읽은 글을 아래에서 직접 확인하고 필요한 부분은 고쳐 주세요.</p>
+<textarea id="sourceText" placeholder="사진 글씨 인식 결과가 여기에 표시됩니다." disabled></textarea>
+<button id="confirmBtn" class="primary" disabled>이 글이 맞아요. 점검 시작하기</button></div>
+</div>
+</section>
+</main>
+<script src="app.js"></script>
+</body></html>
