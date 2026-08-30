@@ -94,6 +94,11 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 속성이 클래스 선택자에 밀리지 않게 못 박는다.
+   .preview 의 display:block 과 .verdict 의 display:flex 가 [hidden] 을 이겨서
+   사진을 고르기 전에도 빈 이미지가, 채점 전에도 빈 판정 줄이 보였다. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--paper);
