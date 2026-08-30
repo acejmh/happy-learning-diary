@@ -8,6 +8,6 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test": "node --test test/run.mjs test/handler.mjs"
+    "test": "node --test test/run.mjs test/handler.mjs test/client.mjs"
   }
 }
