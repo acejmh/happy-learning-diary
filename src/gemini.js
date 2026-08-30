@@ -11,7 +11,7 @@
 export const GEMINI_MODEL = "gemini-3.6-flash";
 
 /** 기본 모델이 과부하일 때 순서대로 내려간다. */
-export const GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash"];
+export const GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-2.5-flash"];
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
@@ -134,6 +134,12 @@ export async function callGemini(apiKey, contents, options = {}) {
         return await callOnce(key, model, contents, generationConfig, timeoutMs);
       } catch (error) {
         lastError = error;
+
+        // 404 는 "그런 모델이 없다"는 뜻이다.
+        // 같은 모델로 다시 시도해봐야 소용없으니 곧바로 다음 모델로 넘어간다.
+        if (error.upstreamStatus === 404) {
+          break;
+        }
 
         if (!error.retryable) {
           throw toClientError(error);
