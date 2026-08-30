@@ -1,5 +1,13 @@
 {
-  "dependencies": {
-    "busboy": "^1.6.0"
+  "name": "happy-learning-diary",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "초등학생 배움일기 맞춤법·띄어쓰기·문맥 코치",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/run.mjs test/handler.mjs"
   }
 }
