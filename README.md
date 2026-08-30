@@ -12,55 +12,78 @@ src/              플랫폼 무관 핵심 로직
   gemini.js         Gemini 호출
   prompts.js        OCR / 첨삭 프롬프트
   guard.js          Origin 검사 · 일일 상한 · 입력 크기 상한
-worker/index.js   Cloudflare Workers 어댑터
+api/analyze.js    Vercel Functions 어댑터   ← 운영 배포처
+worker/index.js   Cloudflare Workers 어댑터 (Gemini 지역 제한으로 사용 불가, 아래 참고)
 netlify/functions/analyze.mjs   Netlify Functions v2 어댑터
 test/             네트워크 없이 도는 검증 (npm test)
 ```
 
-Netlify Functions v2 와 Cloudflare Workers 는 **둘 다 Web 표준 `fetch` 시그니처**를 쓴다.
-그래서 `src/` 하나를 양쪽이 공유하고, 어댑터는 각각 10줄 남짓이다.
+Vercel / Cloudflare Workers / Netlify Functions v2 는 **셋 다 Web 표준 `fetch` 시그니처**를 쓴다.
+그래서 `src/` 하나를 셋이 공유하고, 어댑터는 각각 10줄 남짓이다.
 클라이언트는 항상 `/api/analyze` 만 호출하므로 **호스팅을 옮겨도 프론트엔드는 손댈 필요가 없다.**
 
 > ⚠️ **GitHub Pages 에는 배포할 수 없다.** 이 앱은 서버 함수 없이는 동작하지 않는다.
 > Pages 는 정적 파일만 서빙하므로 `/api/analyze` 가 404 가 되고, 사진 인식 단계에서 멈춘다.
 > Gemini 키를 프론트엔드에 넣어 우회하면 키가 즉시 공개된다. 절대 하지 말 것.
 
+> ⚠️ **Cloudflare Workers 에도 배포할 수 없다.** 배포 자체는 문제없이 되지만,
+> Workers 는 엣지에서 아웃바운드가 나가고 Google 이 그 IP 를 지원 지역으로 인식하지 못한다:
+> ```
+> Gemini API error: User location is not supported for the API use.
+> ```
+> Enterprise 플랜이 아니면 Workers 실행 리전을 고정할 수 없다.
+> `worker/` 와 `wrangler.toml` 은 참고용으로 남겨 두었다.
+> (Google 계정에 결제를 활성화하면 지역 제한이 풀린다는 보고가 있으나 검증하지 않았다.)
+
 ## 로컬 실행
 
 ```bash
 npm test                       # 검증 (API 키 불필요)
-npx wrangler dev               # 로컬 서버 (http://localhost:8787)
+npx vercel dev                 # 로컬 서버 (http://localhost:3000)
+npx wrangler dev               # 대안 (http://localhost:8787)
 ```
 
-`wrangler dev` 로 Gemini 를 실제로 부르려면 프로젝트 루트에 `.dev.vars` 를 만든다
-(`.gitignore` 에 걸려 있어 커밋되지 않는다):
+로컬에서 Gemini 를 실제로 부르려면 키를 넣는다. 둘 다 `.gitignore` 에 걸려 있다.
 
 ```
-GEMINI_API_KEY=여기에_키
+.env.local   →  GEMINI_API_KEY=여기에_키      (vercel dev)
+.dev.vars    →  GEMINI_API_KEY=여기에_키      (wrangler dev)
 ```
 
-## 배포 — Cloudflare Workers (권장)
+참고: **로컬 실행은 Cloudflare 라도 Gemini 지역 제한에 걸리지 않는다.**
+아웃바운드가 엣지가 아니라 내 PC 에서 나가기 때문이다.
+지역 제한은 배포했을 때만 나타난다.
 
-정적 파일과 API 를 워커 하나가 함께 서빙한다. 무료 한도는 하루 10만 요청.
+## 배포 — Vercel (운영)
+
+정적 파일(`public/`)과 API(`api/analyze.js`)를 한 프로젝트가 함께 서빙한다.
+Hobby 플랜은 무료이고 **배포 횟수 제한이 없다.**
 
 ```bash
-npx wrangler login
+npx vercel login
+npx vercel link            # 프로젝트 생성/연결
+npx vercel env add GEMINI_API_KEY production
+npx vercel --prod          # 배포
+```
 
-# 1) 일일 상한 카운터용 KV 네임스페이스 생성
-npx wrangler kv namespace create RATE_LIMIT
-#    출력된 id 를 wrangler.toml 의 [[kv_namespaces]] 블록에 넣고 주석을 푼다
+`vercel.json` 이 `regions: ["iad1"]` 로 **미국 동부에 리전을 고정**한다.
+이것이 Gemini 지역 제한을 피하는 핵심이므로 지우지 말 것.
 
-# 2) API 키는 secret 으로 (vars 에 넣으면 대시보드에 노출된다)
+`ALLOWED_ORIGINS` 는 설정하지 않아도 된다. 비어 있으면 "요청이 도착한 자기 origin" 만
+허용하므로, 배포 URL 이 바뀌어도 알아서 맞는다. 커스텀 도메인을 여러 개 붙였다면 명시한다.
+
+## 배포 — Cloudflare Workers (사용 불가, 참고용)
+
+설정과 배포는 정상 동작하지만 Gemini 호출이 지역 제한에 걸린다(위 경고 참고).
+지역 제한이 풀린 뒤에 쓰려면:
+
+```bash
+npx wrangler kv namespace create RATE_LIMIT   # id 를 wrangler.toml 에 반영
 npx wrangler secret put GEMINI_API_KEY
-
-# 3) 배포
 npx wrangler deploy
 ```
 
-배포되면 `https://happy-learning-diary.<계정>.workers.dev` 가 나온다.
-그 주소를 `wrangler.toml` 의 `ALLOWED_ORIGINS` 에 적고 한 번 더 `deploy` 한다.
-(비워 두면 "요청이 도착한 자기 origin" 만 허용되므로 대개 그대로도 동작하지만,
-커스텀 도메인을 붙였다면 명시해야 한다.)
+Cloudflare 쪽은 KV 로 **일일 상한이 인스턴스 간 공유**되므로, 상한만 놓고 보면 여기가 더 정확하다.
 
 ## 배포 — Netlify (기존, 전환기용)
 
@@ -93,7 +116,12 @@ Netlify 대시보드 → Site settings → Environment variables 에 `GEMINI_API
 
 1. **Origin 검사** — 브라우저는 same-origin POST 에도 `Origin` 헤더를 붙인다.
    `curl` 같은 직접 호출은 헤더가 없어 403 으로 걸린다.
-2. **일일 상한** — IP 당 / 전체. Cloudflare 에서는 KV 로 인스턴스 간 공유된다.
+   **다만 이것은 인증이 아니다.** 주소를 아는 사람이 `Origin` 헤더를 직접 붙이면 통과한다.
+   브라우저 기반 오·남용과 무심코 긁는 봇을 막는 용도이고, 실질적인 방어선은 아래 2번이다.
+   실제로 남용이 관측되면 Cloudflare Turnstile 같은 것을 붙여야 한다.
+2. **일일 상한** — IP 당 60회 / 전체 500회, KST 자정 초기화.
+   Cloudflare 는 KV 로 인스턴스 간 공유되지만, **Vercel/Netlify 는 인스턴스 로컬 카운터라
+   완전하지 않다** (인스턴스가 여러 개 뜨면 각자 센다). 폭주를 늦추는 수준으로 이해할 것.
 3. **입력 크기 상한** — 사진 4MB, 글 4000자.
 
 여기에 더해 클라이언트가 업로드 전에 사진을 긴 변 1600px / JPEG 0.8 로 줄인다.
