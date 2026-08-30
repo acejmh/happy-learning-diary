@@ -13,11 +13,10 @@ ALLOWED_ORIGINS = ""
 DAILY_CALL_LIMIT = "500"
 DAILY_PER_IP_LIMIT = "60"
 
-# 일일 호출 상한 카운터용 KV.
-# 아래 id 는 `npx wrangler kv namespace create RATE_LIMIT` 실행 후 출력된 값으로 교체할 것.
-# [[kv_namespaces]]
-# binding = "RATE_LIMIT"
-# id = "여기에_KV_네임스페이스_ID"
+# 일일 호출 상한 카운터용 KV. (2026-08-30 생성)
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "84c9491537374e86b6c14e0e32da20f2"
 
 # GEMINI_API_KEY 는 vars 가 아니라 secret 으로 넣는다:
 #   npx wrangler secret put GEMINI_API_KEY
