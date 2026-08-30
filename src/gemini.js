@@ -10,16 +10,18 @@
  */
 export const GEMINI_MODEL = "gemini-3.6-flash";
 
-/** 기본 모델이 과부하일 때 순서대로 내려간다. */
-export const GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-2.5-flash"];
+// 이 키에서 3.5-flash / 2.5-flash 가 모두 404 라 폴백을 비워 둔다.
+// 쓸 수 있는 모델 이름을 확인하면 다시 채운다.
+export const GEMINI_FALLBACK_MODELS = [];
 
 const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /** 잠깐 뒤 다시 하면 될 가능성이 있는 상태 코드 */
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-/** 모델 하나당 재시도 간격. 길이 + 1 이 모델당 총 시도 횟수. */
-const RETRY_DELAYS_MS = [600, 1800];
+// 3.6 의 과부하는 몇 초짜리 스파이크다. 짧게 3번 치고 마는 것보다
+// 간격을 늘려 4번 시도하는 편이 실제로 훨씬 잘 넘어간다.
+const RETRY_DELAYS_MS = [800, 2000, 5000];
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
