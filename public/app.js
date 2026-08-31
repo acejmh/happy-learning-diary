@@ -172,7 +172,18 @@ async function prepareImage(file, rotation) {
 
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', JPEG_QUALITY));
 
-  return blob ? new File([blob], 'photo.jpg', { type: 'image/jpeg' }) : file;
+  if (!blob) {
+    /* iOS Safari 는 큰 사진에서 toBlob 이 null 을 주는 일이 있다.
+       돌리기를 눌렀는데 원본을 그냥 보내면 "왜 안 돌아가지?" 가 된다.
+       차라리 왜 안 되는지 말해 준다. */
+    if (quarter !== 0) {
+      throw new Error('사진을 돌리지 못했어요. 사진을 조금 작게 찍어서 다시 올려 볼까요?');
+    }
+
+    return file;
+  }
+
+  return new File([blob], 'photo.jpg', { type: 'image/jpeg' });
 }
 
 /* ─────────────────────────────────────────── 화면 뼈대 */
