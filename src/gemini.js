@@ -90,8 +90,13 @@ async function callOnce(apiKey, model, contents, generationConfig, timeoutMs) {
     throw new GeminiError("이 사진은 처리할 수 없어요. 다른 사진으로 시도해 주세요.", 422);
   }
 
+  /* 사고 요약(thought) 파트는 최종 답이 아니다.
+     같이 이어붙이면 아이 화면에 "Wait, ... Aha!!" 같은 숙고 과정이 그대로 나온다. */
   const text =
-    candidate?.content?.parts?.map((part) => part.text || "").join("") || "";
+    (candidate?.content?.parts || [])
+      .filter((part) => !part.thought)
+      .map((part) => part.text || "")
+      .join("") || "";
 
   if (!text.trim()) {
     const e = new GeminiError("Gemini 가 빈 응답을 반환", 502);
