@@ -217,6 +217,12 @@ h3 { font-size: 1.02rem; font-weight: 600; }
 .drop b { display: block; color: var(--ink); font-size: 1.05rem; margin-bottom: .2rem; }
 .drop small { color: var(--ink-3); }
 .drop input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.tip {
+  margin: .8rem 0 0;
+  font-size: .84rem;
+  color: var(--ink-3);
+}
+.tip b { color: var(--ink-2); }
 .preview {
   display: block;
   width: 100%;
