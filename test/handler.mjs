@@ -125,6 +125,58 @@ test('4MB 초과 사진은 413', async () => {
   assert.match((await res.json()).error, /너무 커요/);
 });
 
+test('OCR: 사고 과정이 나오면 422 로 막는다', async () => {
+  // 실제로 나왔던 응답. 사진이 옆으로 누워 있어 모델이 전사를 포기하고 숙고를 늘어놓았다.
+  stubGemini('` ? No, `2` `1` `3`.\nWait, above `213` there is `721`? '
+    + 'No, `721` is faint ghost text from the back of the page!\n'
+    + 'Aha!! Look at the background!');
+
+  const form = new FormData();
+  form.append('image', new File([new Uint8Array([1, 2, 3, 4])], 'a.jpg', { type: 'image/jpeg' }));
+
+  const res = await run(request(form));
+  const data = await res.json();
+
+  assert.equal(res.status, 422);
+  assert.ok(!JSON.stringify(data).includes('Aha'), '숙고 내용이 아이 화면으로 새면 안 된다');
+  assert.match(data.error, /똑바로 서 있는지/);
+});
+
+test('OCR: 영어 잡문도 막는다', async () => {
+  stubGemini('I should look at this image more carefully to determine the text.');
+
+  const form = new FormData();
+  form.append('image', new File([new Uint8Array([1, 2, 3, 4])], 'a.jpg', { type: 'image/jpeg' }));
+
+  assert.equal((await run(request(form))).status, 422);
+});
+
+test('OCR: 사고 요약(thought) 파트는 최종 텍스트에서 걸러진다', async () => {
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('generativelanguage.googleapis.com')) {
+      return new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            parts: [
+              { text: 'Wait, let me look at the background again...', thought: true },
+              { text: '맑음\n오늘 수학시간에 곱셈을 배웠다.' }
+            ]
+          }
+        }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return realFetch(url);
+  };
+
+  const form = new FormData();
+  form.append('image', new File([new Uint8Array([1, 2, 3, 4])], 'a.jpg', { type: 'image/jpeg' }));
+
+  const data = await (await run(request(form))).json();
+
+  assert.equal(data.text, '맑음\n오늘 수학시간에 곱셈을 배웠다.');
+  assert.ok(!data.text.includes('Wait'), '사고 요약이 섞이면 안 된다');
+});
+
 /* ───────────────────────────────── mode 분기 */
 
 test('mode 가 없으면 400', async () => {
