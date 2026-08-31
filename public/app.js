@@ -63,7 +63,9 @@ const $ = (id) => document.getElementById(id);
 
 const state = {
   step: 0,
-  file: null,
+  file: null,        // 사용자가 고른 원본
+  prepared: null,    // 회전·축소를 마친, 실제로 보낼 파일
+  rotation: 0,       // 0 / 90 / 180 / 270
   previewUrl: null,
   text: '',       // 아이가 확정한 원본
   items: [],      // 이번 미션에서 고칠 항목
@@ -114,30 +116,63 @@ function loadImage(file) {
   });
 }
 
-/** 긴 변을 MAX_EDGE 로 줄이고 JPEG 로 다시 인코딩한다. 이미 작으면 원본을 그대로 쓴다. */
-async function shrinkImage(file) {
-  const img = await loadImage(file);
-  const longEdge = Math.max(img.naturalWidth, img.naturalHeight);
+/**
+ * 사진을 디코딩한다.
+ * createImageBitmap 의 imageOrientation:'from-image' 는 EXIF 회전 정보를 반영해 준다.
+ * 캔버스에 그대로 그리면 EXIF 가 무시돼 옆으로 누운 사진이 그대로 전송된다.
+ */
+async function decodeImage(file) {
+  if (typeof createImageBitmap === 'function') {
+    try {
+      return await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (e) {
+      // 지원하지 않는 브라우저는 아래로 떨어진다.
+    }
+  }
 
-  if (longEdge <= MAX_EDGE && file.size <= 1500000) return file;
+  return loadImage(file);
+}
+
+/**
+ * 회전을 적용하고 긴 변을 MAX_EDGE 로 줄여 JPEG 로 다시 만든다.
+ *
+ * 사진이 옆으로 누워 있으면 글씨가 세로로 서고, 그러면 OCR 이 전사를 포기하고
+ * 자기 생각을 늘어놓는다. 똑바로 세워서 보내는 것이 인식률의 핵심이다.
+ */
+async function prepareImage(file, rotation) {
+  const quarter = ((rotation % 360) + 360) % 360;
+  const source = await decodeImage(file);
+
+  const w = source.width || source.naturalWidth;
+  const h = source.height || source.naturalHeight;
+  const longEdge = Math.max(w, h);
+
+  // 돌릴 것도 없고 이미 작으면 원본을 그대로 쓴다.
+  if (quarter === 0 && longEdge <= MAX_EDGE && file.size <= 1500000) {
+    if (source.close) source.close();
+    return file;
+  }
 
   const scale = Math.min(1, MAX_EDGE / longEdge);
-  const canvas = document.createElement('canvas');
+  const dw = Math.round(w * scale);
+  const dh = Math.round(h * scale);
+  const swap = quarter === 90 || quarter === 270;
 
-  canvas.width = Math.round(img.naturalWidth * scale);
-  canvas.height = Math.round(img.naturalHeight * scale);
+  const canvas = document.createElement('canvas');
+  canvas.width = swap ? dh : dw;
+  canvas.height = swap ? dw : dh;
 
   const ctx = canvas.getContext('2d');
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(quarter * Math.PI / 180);
+  ctx.drawImage(source, -dw / 2, -dh / 2, dw, dh);
+
+  if (source.close) source.close();
 
   const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', JPEG_QUALITY));
 
-  if (!blob) return file;
-
-  return blob.size < file.size
-    ? new File([blob], 'photo.jpg', { type: 'image/jpeg' })
-    : file;
+  return blob ? new File([blob], 'photo.jpg', { type: 'image/jpeg' }) : file;
 }
 
 /* ─────────────────────────────────────────── 화면 뼈대 */
@@ -187,7 +222,11 @@ function screenUpload() {
     '</div>' +
     '<img id="preview" class="preview" alt="고른 사진 미리보기" hidden>' +
     '<p class="status" id="status">사진을 먼저 골라 주세요.</p>' +
-    '<div class="actions"><button class="btn btn-go" id="read" disabled>사진 글씨 읽기</button></div>' +
+    '<div class="actions">' +
+    '<button class="btn btn-go" id="read" disabled>사진 글씨 읽기</button>' +
+    '<button class="btn btn-quiet" id="rotate" disabled>↻ 사진 돌리기</button>' +
+    '</div>' +
+    '<p class="tip">글씨가 옆으로 누워 있으면 <b>사진 돌리기</b>로 똑바로 세워 주세요. 그래야 잘 읽어요.</p>' +
     '</section>';
 
   const drop = $('drop');
@@ -204,17 +243,38 @@ function screenUpload() {
 
   $('read').onclick = runOcr;
 
-  if (state.file) showPreview(state.file);
+  $('rotate').onclick = () => {
+    state.rotation = (state.rotation + 90) % 360;
+    refreshPreview();
+  };
+
+  if (state.file) refreshPreview();
 }
 
-function showPreview(file) {
-  if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
-  state.previewUrl = URL.createObjectURL(file);
+/**
+ * 미리보기는 회전·축소를 마친 **실제로 보낼 그림**을 보여 준다.
+ * 화면에서 본 그대로가 서버로 가야 "돌렸는데 왜 그대로지?" 가 생기지 않는다.
+ */
+async function refreshPreview() {
+  $('rotate').disabled = true;
+  $('read').disabled = true;
 
-  const img = $('preview');
-  img.src = state.previewUrl;
-  img.hidden = false;
-  $('read').disabled = false;
+  try {
+    state.prepared = await prepareImage(state.file, state.rotation);
+
+    if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
+    state.previewUrl = URL.createObjectURL(state.prepared);
+
+    const img = $('preview');
+    img.src = state.previewUrl;
+    img.hidden = false;
+  } catch (error) {
+    setStatus(error.message, 'bad');
+    return;
+  } finally {
+    if ($('rotate')) $('rotate').disabled = !state.file;
+    if ($('read')) $('read').disabled = !state.file;
+  }
 }
 
 function acceptFile(file) {
@@ -226,8 +286,9 @@ function acceptFile(file) {
   }
 
   state.file = file;
-  showPreview(file);
+  state.rotation = 0;
   setStatus('사진이 준비됐어요.');
+  refreshPreview();
 }
 
 async function runOcr() {
@@ -236,7 +297,7 @@ async function runOcr() {
   setStatus('사진을 준비하는 중이에요…', 'busy');
 
   try {
-    const image = await shrinkImage(state.file);
+    const image = state.prepared || await prepareImage(state.file, state.rotation);
 
     setStatus('사진의 글씨를 읽는 중이에요…', 'busy');
 
@@ -517,6 +578,8 @@ function screenDone() {
   $('again').onclick = () => {
     if (state.previewUrl) URL.revokeObjectURL(state.previewUrl);
     state.file = null;
+    state.prepared = null;
+    state.rotation = 0;
     state.previewUrl = null;
     state.text = '';
     state.items = [];
