@@ -84,6 +84,35 @@ function appearsIn(text, fragment) {
   return text.includes(fragment) || squash(text).includes(squash(fragment));
 }
 
+/**
+ * 전사 결과가 아니라 모델의 "생각"이 나온 경우를 걸러낸다.
+ *
+ * 사진이 옆으로 누웠거나 글씨가 흐리면, 모델이 전사를 포기하고
+ *   Wait, above `213` there is `721`? ... Aha!! Look at the background!
+ * 처럼 숙고 과정을 답으로 내놓는 일이 실제로 있었다.
+ * 그대로 화면에 띄우면 아이가 영문 잡문을 자기 일기로 보게 된다.
+ */
+function looksLikeThinking(text) {
+  const t = String(text).trim();
+
+  if (!t) return true;
+  if (t.includes("`")) return true;                       // 프롬프트가 금지한 문자
+  if (/\b(Wait|Aha|Hmm|Let me|I should|Looking at|Actually)\b/i.test(t)) return true;
+
+  // 한국어 일기의 전사라면 한글이 대부분이어야 한다.
+  const hangul = (t.match(/[가-힣]/g) || []).length;
+
+  return hangul / t.length < 0.3;
+}
+
+/** 한 번 더 시킬 때 덧붙이는 못박기. */
+const OCR_RETRY_NOTE = `
+
+다시 강조합니다. 생각하는 과정을 쓰지 마세요.
+"Wait", "Aha", "Hmm", "Let me", "Looking at" 같은 말이나 백틱(\`)을 절대 출력하지 마세요.
+사진에서 읽은 한국어 문장만 출력하세요.
+글씨를 읽을 수 없으면 아무것도 출력하지 마세요.`;
+
 /* ─────────────────────────────────────────── 사진 OCR */
 
 async function handleOcr(request, apiKey) {
@@ -116,19 +145,34 @@ async function handleOcr(request, apiKey) {
 
   const imageBase64 = toBase64(await image.arrayBuffer());
 
-  const recognizedText = await callGemini(
+  const readOnce = (prompt) => callGemini(
     apiKey,
     [
       {
         role: "user",
         parts: [
-          { text: OCR_PROMPT },
+          { text: prompt },
           { inlineData: { mimeType, data: imageBase64 } }
         ]
       }
     ],
     { temperature: 0.05, maxOutputTokens: 2048 }
   );
+
+  let recognizedText = await readOnce(OCR_PROMPT);
+
+  if (looksLikeThinking(recognizedText)) {
+    console.error("OCR: 숙고 과정으로 보이는 응답. 한 번 더 시도.", recognizedText.slice(0, 200));
+    recognizedText = await readOnce(OCR_PROMPT + OCR_RETRY_NOTE);
+  }
+
+  if (looksLikeThinking(recognizedText)) {
+    console.error("OCR: 두 번째도 실패.", recognizedText.slice(0, 200));
+
+    return json(422, {
+      error: "사진의 글씨를 읽지 못했어요. 사진이 똑바로 서 있는지 확인하고, 더 밝은 곳에서 다시 찍어 볼까요?"
+    });
+  }
 
   return json(200, { text: recognizedText.trim() });
 }
