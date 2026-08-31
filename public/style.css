@@ -389,6 +389,10 @@ h3 { font-size: 1.02rem; font-weight: 600; }
 .change-why { grid-column: 2; font-size: .89rem; color: var(--ink-2); }
 
 @media (max-width: 620px) {
+  /* 6칸에 라벨까지 넣으면 좁은 화면에서 글자가 칸을 넘는다.
+     어느 단계인지는 카드의 "미션 2 / 3" 이 이미 말해 주므로 막대만 남긴다. */
+  .pip small { display: none; }
+  .rail { gap: .35rem; }
   .compare { grid-template-columns: 1fr; }
   .pair { grid-template-columns: 1fr; gap: .45rem; }
   .arrow { display: none; }
